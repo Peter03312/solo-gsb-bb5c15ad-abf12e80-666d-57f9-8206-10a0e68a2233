@@ -285,3 +285,22 @@ button.fault-btn { color: var(--fault); border-color: #6b512c; margin-top: 2px; 
 .hint-flag.flag-fault-self { font-weight: 700; }
 .fault-history { margin-top: 10px; font-size: 13px; }
 .fault-history li { margin: 6px 0; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
+
+/* ---- 演出封场结项 ---- */
+.badge.closed-badge { background: #2b2034; color: #d2a3e8; border: 1px solid #7a5a92; }
+.status.closing-chip { color: #d2a3e8; }
+.closing-panel { border-left: 4px solid #9a6fb5; margin-bottom: 16px; }
+.closing-panel.has-blockers { background: #241d2b; }
+.closing-panel.locked { border-left-color: var(--border); }
+.closing-panel.closed { border-left-color: #d2a3e8; background: #201a27; }
+.readonly-note.closed-note { border-color: #7a5a92; background: #241d2b; color: #d2a3e8; }
+.closing-note-box {
+  margin-top: 8px; padding: 8px 12px; border-radius: 8px;
+  background: rgba(210, 163, 232, 0.08); border: 1px solid #4a3860; font-size: 13px;
+}
+.closing-block { margin: 8px 0; }
+.closing-block .hint-flag { margin: 2px 4px 2px 0; display: inline-block; }
+.closing-final-table td { vertical-align: top; }
+.closing-reason-row td { padding-top: 0; font-size: 12px; }
+.origin-hops { margin-top: 2px; font-size: 12px; }
+.hint-flag.flag-review { color: #b9a7f2; border-color: #5a4d86; background: #262238; }

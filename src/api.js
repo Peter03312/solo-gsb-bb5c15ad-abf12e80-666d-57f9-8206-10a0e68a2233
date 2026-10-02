@@ -6,9 +6,11 @@
  *   404 资源不存在
  *   409 冲突（提示已有结果、版本已发布不可改、撤回时当前状态不允许或下游仍已触发、
  *       复核申请重复/已处置/处置人身份不符、待复核期间跳过或撤回、
- *       对只读（已接续）演出执行现场操作或接续、接续核对存在编号冲突）
+ *       对只读（已接续）/已封场演出执行写操作或接续 / 封场、接续核对存在编号冲突、
+ *       封场被阻项保持可操作、重复封场）
  *   422 校验未通过（缺失引用/循环依赖）、前置未触发（受阻，含复核确认时前置失效）
- *       或受未解除设备故障影响（触发 / 复核确认被冻结，附 blocked_by_faults，申请保持待复核）
+ *       或受未解除设备故障影响（触发 / 复核确认被冻结，附 blocked_by_faults，申请保持待复核）；
+ *       封场前核对存在阻项（未完成提示 / 待复核申请 / 未解除故障 / 待签收交接单）
  */
 const { db, withTx } = require('./db');
 const { validateCues, CUE_TYPES } = require('./validate');
@@ -99,8 +101,16 @@ function getPerfCue(performanceId, cueId) {
   return { perf, cue };
 }
 
-/** 已接续的原演出为只读：拒绝一切现场操作（须在 BEGIN IMMEDIATE 事务内调用以读到最新状态） */
+/** 已接续的原演出为只读 / 已封场演出为终态只读：拒绝一切现场写操作
+ *  （须在 BEGIN IMMEDIATE 事务内调用以读到最新状态） */
 function assertActiveInTx(perf) {
+  if (perf && perf.status === 'closed') {
+    throw new HttpError(
+      409,
+      '该演出已封场结项，所有现场处置、复核、故障、交接与接续写操作均已关闭；原记录与封场报告仅可回看',
+      { readonly: true, closed: true }
+    );
+  }
   if (perf && perf.status === 'readonly') {
     const next = db.prepare(
       'SELECT np.id, np.name, v.version_number FROM performances np JOIN versions v ON v.id = np.version_id WHERE np.continued_from_performance_id = ? ORDER BY np.id LIMIT 1'
@@ -110,6 +120,7 @@ function assertActiveInTx(perf) {
       `该演出已按修订执行单接续（接续时间 ${perf.continued_at || '-'}，操作人 ${perf.continued_by || '-'}），原演出保持原快照且为只读，请到接续演出继续操作`,
       {
         readonly: true,
+        closed: false,
         continued_at: perf.continued_at || null,
         continued_by: perf.continued_by || null,
         ...(next
@@ -415,6 +426,7 @@ route('GET', '/api/performances/:id', (body, p) => {
         }
       : null,
     readonly: perf.status === 'readonly',
+    closed: perf.status === 'closed',
   };
 
   // 可作为接续目标的版本：同场次、版本号更高、已发布（仅可操作演出列出）
@@ -498,6 +510,9 @@ route('GET', '/api/performances/:id', (body, p) => {
     : null;
   const handover_history = handoverListRows(perf.id).map((row) => presentHandover(row, null));
 
+  // 封场结项：封场后携带不可变结项报告（未封场为 null）；原记录（流水/复核/故障/交接）仍可回看
+  const closing = closingRowFor(perf.id);
+
   return {
     performance: perf,
     continuation,
@@ -509,6 +524,7 @@ route('GET', '/api/performances/:id', (body, p) => {
     active_fault_count: activeFaults.length,
     handover,
     handover_history,
+    closing,
   };
 });
 
@@ -1181,6 +1197,9 @@ function buildContinuationPlan(perf, target) {
 route('POST', '/api/performances/:id/continue/preview', (body, p) => {
   const perf = db.prepare('SELECT * FROM performances WHERE id = ?').get(p.id);
   if (!perf) throw new HttpError(404, '演出不存在');
+  if (perf.status === 'closed') {
+    throw new HttpError(409, '该演出已封场结项，不能再发起接续；封场报告可回看', { readonly: true, closed: true });
+  }
   if (perf.status === 'readonly') {
     throw new HttpError(409, '该演出已接续并转为只读，不能再发起接续；请从当前可操作（接续）演出发起', { readonly: true });
   }
@@ -1267,6 +1286,9 @@ route('POST', '/api/performances/:id/continue', (body, p) => {
   if (!operator) throw new HttpError(400, '请填写操作人');
   const perf = db.prepare('SELECT * FROM performances WHERE id = ?').get(p.id);
   if (!perf) throw new HttpError(404, '演出不存在');
+  if (perf.status === 'closed') {
+    throw new HttpError(409, '该演出已封场结项，不能重复接续；封场报告可回看', { readonly: true, closed: true });
+  }
   if (perf.status === 'readonly') {
     throw new HttpError(409, '该演出已接续并转为只读，不能重复接续；请从当前可操作（接续）演出发起', { readonly: true });
   }
@@ -2045,8 +2067,9 @@ function getActivePerformance(performanceId) {
 }
 
 route('POST', '/api/performances/:id/batch/preview', (body, p) => {
-  const { operator, items } = parseGroupBody(body);
+  // 先做演出状态判定：已接续只读 / 已封场演出统一 409（优先于清单结构校验）
   const perf = getActivePerformance(Number(p.id));
+  const { operator, items } = parseGroupBody(body);
   // Node 单线程同步读：快照内逐项判定，不会穿插其他写操作；不修改任何数据
   const plan = evaluateBatch(perf, operator, items, true);
   const version = db.prepare('SELECT id, version_number FROM versions WHERE id = ?').get(perf.version_id);
@@ -2099,6 +2122,369 @@ route('POST', '/api/performances/:id/batch', (body, p) => {
       results: plan.results,
     };
   });
+});
+
+/* ---- 演出封场结项（封场前核对 + 一次性固定不可变报告；与全部现场写操作同一 BEGIN IMMEDIATE 串行判定） ---- */
+
+/** 该演出的封场记录（含解析后的报告），未封场返回 null */
+function closingRowFor(performanceId) {
+  const row = db.prepare('SELECT * FROM performance_closings WHERE performance_id = ?').get(performanceId);
+  if (!row) return null;
+  let report = null;
+  try { report = JSON.parse(row.report); } catch { report = null; }
+  return {
+    id: row.id,
+    performance_id: row.performance_id,
+    closed_by: row.closed_by,
+    note: row.note,
+    closed_at: row.closed_at,
+    report,
+  };
+}
+
+/**
+ * 沿接续链追溯一条（可能为承接的）流水至其原流水（manual）：
+ * 承接结果沿 carried_from_performance_id / carried_from_event_id 逐级回溯，
+ * 返回 { origin, hops }，origin 为最初现场触发/跳过的 manual 流水所在演出与记录；
+ * hops 为从本场到原流水的完整承接链（含本场当前事件）。
+ */
+function traceEventOrigin(event, versionNumberByPerfId) {
+  const hops = [];
+  let curPerfId = event.performance_id;
+  let curEvent = event;
+  const seen = new Set();
+  for (let guard = 0; guard < 1000; guard += 1) {
+    hops.push({
+      performance_id: curPerfId,
+      version_number: versionNumberByPerfId.get(curPerfId) || null,
+      event_id: curEvent.id,
+      action: curEvent.action,
+      source: curEvent.source,
+      operator: curEvent.operator,
+      created_at: curEvent.created_at,
+    });
+    const key = `${curPerfId}:${curEvent.id}`;
+    if (seen.has(key)) break;
+    seen.add(key);
+    if (curEvent.source !== 'carried' || !curEvent.carried_from_event_id) break;
+    const nextPerfId = curEvent.carried_from_performance_id;
+    const nextEvent = nextPerfId
+      ? db.prepare('SELECT * FROM cue_events WHERE id = ? AND performance_id = ?')
+        .get(curEvent.carried_from_event_id, nextPerfId)
+      : null;
+    if (!nextEvent) break;
+    curPerfId = nextPerfId;
+    curEvent = nextEvent;
+  }
+  const origin = hops[hops.length - 1];
+  return {
+    origin: {
+      performance_id: origin.performance_id,
+      version_number: origin.version_number,
+      event_id: origin.event_id,
+      operator: origin.operator,
+      created_at: origin.created_at,
+    },
+    hops,
+  };
+}
+
+/**
+ * 封场前核对（须在 BEGIN IMMEDIATE 事务内调用，纯读不改数据）：
+ * 按当前演出版本逐条核对提示——每条都须有有效「已触发 / 已跳过」结果（承接结果同样有效，
+ * 其来源沿接续链追溯）；并确认无待复核申请、未解除故障、待签收交接单。
+ * 返回 { can_close, blockers: { pending_cues, review_requests, active_faults, pending_handovers }, counts }。
+ */
+function evaluateClosing(perf) {
+  const cues = getVersionCues(perf.version_id);
+  const latestByCue = latestEventsByCue(perf.id);
+
+  // 未完成提示（无有效结果）：复用交接快照的阻塞原因分类
+  // （blocked 前置未触发 / review_pending 待复核 / own_fault 本提示故障 /
+  //  fault_blocked 受故障影响触发冻结 / pending 待执行）
+  const snapshot = buildHandoverSnapshot(perf);
+  const pendingByLabel = new Map(snapshot.pending_cues.map((pc) => [pc.label, pc]));
+  const pending_cues = cues
+    .filter((c) => {
+      const e = latestByCue.get(c.id);
+      return !(e && e.action !== 'retracted');
+    })
+    .map((c) => {
+      const pc = pendingByLabel.get(c.label);
+      return {
+        cue_id: c.id,
+        label: c.label,
+        seq: c.seq,
+        reason_codes: pc ? pc.reason_codes : ['pending'],
+        reason_text: pc ? pc.reason_text : PENDING_REASON_TEXT.pending,
+      };
+    })
+    .sort((a, b) => a.seq - b.seq || a.label.localeCompare(b.label));
+
+  // 待复核申请（pending）：确认 / 撤销 / 驳回后方可封场
+  const reviewRequests = db.prepare(`
+    SELECT r.id, r.requested_by, r.requested_at, c.label AS label, c.seq AS seq
+    FROM cue_review_requests r JOIN cues c ON c.id = r.cue_id
+    WHERE r.performance_id = ? AND r.status = 'pending'
+    ORDER BY r.id
+  `).all(perf.id);
+
+  // 未解除故障（含影响范围）：全部解除后方可封场
+  const impact = faultImpact(cues, activeFaultRows(perf.id));
+  const active_faults = impact.faults
+    .map((f) => ({
+      fault_id: f.id,
+      cue_id: f.cue_id,
+      label: f.label,
+      reported_by: f.reported_by,
+      reason: f.reason,
+      reported_at: f.reported_at,
+      affected_labels: f.affected_labels,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+
+  // 待签收交接单：签收或由交班人重提后再签收 / 等待作废处理后方可封场
+  const pendingHandover = pendingHandoverRow(perf.id);
+  const pending_handovers = pendingHandover ? [{
+    handover_id: pendingHandover.id,
+    handed_by: pendingHandover.handed_by,
+    received_by: pendingHandover.received_by,
+    created_at: pendingHandover.created_at,
+  }] : [];
+
+  const blockers = { pending_cues, review_requests: reviewRequests, active_faults, pending_handovers };
+  const counts = {
+    pending_cues: pending_cues.length,
+    review_requests: reviewRequests.length,
+    active_faults: active_faults.length,
+    pending_handovers: pending_handovers.length,
+  };
+  return { can_close: counts.pending_cues + counts.review_requests + counts.active_faults + counts.pending_handovers === 0, blockers, counts };
+}
+
+/** 构造封场阻项错误（422：封场前条件未满足；演出保持可操作、不产生报告） */
+function closingBlockedError(check) {
+  const { blockers, counts } = check;
+  const parts = [];
+  if (counts.pending_cues) parts.push(`${counts.pending_cues} 条提示尚无有效结果（${blockers.pending_cues.map((c) => c.label).join('、')}）`);
+  if (counts.review_requests) parts.push(`${counts.review_requests} 个待复核申请未处置（${blockers.review_requests.map((r) => r.label).join('、')}）`);
+  if (counts.active_faults) parts.push(`${counts.active_faults} 个未解除故障（${blockers.active_faults.map((f) => f.label).join('、')}）`);
+  if (counts.pending_handovers) parts.push(`${counts.pending_handovers} 张待签收交接单`);
+  return new HttpError(
+    422,
+    `封场核对未通过，演出保持可操作、未生成封场报告：${parts.join('；')}。请处理完全部阻项后再封场`,
+    { can_close: false, blockers, counts }
+  );
+}
+
+/**
+ * 构造不可变结项报告（须在 BEGIN IMMEDIATE 内、核对通过后调用）：
+ * 一次性固定结项时间、结项人、每条提示的最终有效结果及原操作人、时间、流水与来源演出；
+ * 承接（carried）结果沿接续链追溯到原流水（origin / hops），原操作人/时间沿用，不算本场再次触发；
+ * 同时固定全部复核申请、故障登记/解除、交接单与流水统计，供永久回看。
+ */
+function buildClosingReport(perf, closedBy, note, closedAt) {
+  const cues = getVersionCues(perf.version_id);
+  const show = db.prepare('SELECT id, name FROM shows WHERE id = ?').get(perf.show_id);
+  const version = db.prepare('SELECT id, version_number, note AS version_note FROM versions WHERE id = ?').get(perf.version_id);
+
+  // 接续链上各演出的版本号（追溯承接结果时展示来源版本）
+  const chain = continuationChain(perf.id);
+  const versionNumberByPerfId = new Map(chain.map((p) => [
+    p.id,
+    db.prepare('SELECT version_number FROM versions WHERE id = ?').get(p.version_id)?.version_number || null,
+  ]));
+  const chain_performance_ids = chain.map((p) => p.id);
+
+  // 本场全部流水（最新在上）；承接流水带出来源演出/来源事件
+  const events = db.prepare(`
+    SELECT e.*, c.label AS label, c.seq AS seq FROM cue_events e
+    JOIN cues c ON c.id = e.cue_id
+    WHERE e.performance_id = ? ORDER BY e.id DESC
+  `).all(perf.id);
+  const latestByCue = latestEventsByCue(perf.id);
+
+  let manualCount = 0;
+  let carriedCount = 0;
+  let firedCount = 0;
+  let skippedCount = 0;
+  for (const e of events) {
+    if (e.source === 'carried') carriedCount += 1; else manualCount += 1;
+  }
+
+  const final_results = cues.map((c) => {
+    const e = latestByCue.get(c.id) || null;
+    const effective = e && e.action !== 'retracted' ? e.action : null;
+    if (effective === 'fired') firedCount += 1;
+    if (effective === 'skipped') skippedCount += 1;
+    const traced = e ? traceEventOrigin(e, versionNumberByPerfId) : null;
+    return {
+      cue_id: c.id,
+      label: c.label,
+      seq: c.seq,
+      type: c.type,
+      description: c.description,
+      deps: c.deps,
+      needs_review: !!c.needs_review,
+      final_status: effective, // fired / skipped / null（封场核对保证非 null）
+      event_id: e ? e.id : null,
+      operator: e ? e.operator : null,
+      created_at: e ? e.created_at : null,
+      reason: e && e.reason ? e.reason : null,
+      source: e ? e.source : null, // manual / carried
+      carried_from_performance_id: e && e.source === 'carried' ? (e.carried_from_performance_id || null) : null,
+      carried_from_event_id: e && e.source === 'carried' ? (e.carried_from_event_id || null) : null,
+      origin: traced ? traced.origin : null,
+      origin_hops: traced ? traced.hops : null,
+    };
+  });
+
+  const review_requests = db.prepare(`
+    SELECT r.*, c.label AS label, c.seq AS seq FROM cue_review_requests r
+    JOIN cues c ON c.id = r.cue_id
+    WHERE r.performance_id = ? ORDER BY r.id
+  `).all(perf.id).map((r) => ({
+    id: r.id, label: r.label, status: r.status,
+    requested_by: r.requested_by, requested_at: r.requested_at,
+    resolved_by: r.resolved_by || null, resolved_at: r.resolved_at || null,
+    resolve_reason: r.resolve_reason || null, event_id: r.event_id || null,
+  }));
+
+  const allFaults = allFaultRows(perf.id);
+  const activeAtClose = faultImpact(cues, activeFaultRows(perf.id)).faults;
+  const faults = allFaults.map((f) => {
+    const active = activeAtClose.find((af) => af.id === f.id);
+    return {
+      id: f.id, label: f.label, status: f.status,
+      reported_by: f.reported_by, reason: f.reason, reported_at: f.reported_at,
+      resolved_by: f.resolved_by || null, resolved_at: f.resolved_at || null,
+      resolve_reason: f.resolve_reason || null,
+      affected_labels: active ? active.affected_labels : [],
+    };
+  }).sort((a, b) => b.id - a.id);
+
+  const handovers = db.prepare('SELECT * FROM cue_handovers WHERE performance_id = ? ORDER BY id').all(perf.id)
+    .map((h) => ({
+      id: h.id, status: h.status, handed_by: h.handed_by, received_by: h.received_by,
+      note: h.note, created_at: h.created_at, signed_at: h.signed_at || null,
+      superseded_at: h.superseded_at || null, superseded_by_handover_id: h.superseded_by_handover_id || null,
+    }));
+
+  const eventMaxId = events.length ? Math.max(...events.map((e) => e.id)) : null;
+  return {
+    report_version: 20261002,
+    closed_at: closedAt,
+    closed_by: closedBy,
+    note,
+    show: show ? { id: show.id, name: show.name } : null,
+    version: version ? { id: version.id, version_number: version.version_number, note: version.version_note } : null,
+    performance: {
+      id: perf.id,
+      name: perf.name,
+      started_by: perf.started_by,
+      started_at: perf.started_at,
+      continuation_from_performance_id: perf.continued_from_performance_id || null,
+      continuation_chain_performance_ids: chain_performance_ids,
+    },
+    cue_total: cues.length,
+    fired_count: firedCount,
+    skipped_count: skippedCount,
+    manual_event_count: manualCount,
+    carried_event_count: carriedCount,
+    latest_event_id: eventMaxId,
+    final_results,
+    review_requests,
+    faults,
+    handovers,
+    events: events.map((e) => ({
+      id: e.id, label: e.label, seq: e.seq, action: e.action, operator: e.operator,
+      reason: e.reason || null, created_at: e.created_at, source: e.source,
+      carried_from_performance_id: e.carried_from_performance_id || null,
+      carried_from_event_id: e.carried_from_event_id || null,
+    })),
+  };
+}
+
+/**
+ * 执行封场：封场判定与现场写操作在同一 BEGIN IMMEDIATE 事务内串行——
+ * 事务内重读演出状态与全部阻项，通过则一次性写入封场记录（固定结项时间/结项人/不可变报告）
+ * 并把演出置为 closed 终态；有阻项则整体回滚（演出保持可操作、不产生报告，不会留下部分结项）。
+ */
+function closePerformance(perfId, closedBy, note) {
+  return withTx(() => {
+    const fresh = db.prepare('SELECT * FROM performances WHERE id = ?').get(perfId);
+    if (!fresh) throw new HttpError(404, '演出不存在');
+    if (fresh.status === 'closed') {
+      throw new HttpError(
+        409,
+        '该演出已封场结项，不能重复封场；可回看原记录与不可变封场报告',
+        { readonly: true, closed: true, closing: closingRowFor(fresh.id) }
+      );
+    }
+    assertActiveInTx(fresh); // readonly（已接续）演出不能封场
+
+    const check = evaluateClosing(fresh);
+    if (!check.can_close) throw closingBlockedError(check);
+
+    const closedAt = new Date().toISOString();
+    const report = buildClosingReport(fresh, closedBy, note, closedAt);
+    const info = db.prepare(
+      'INSERT INTO performance_closings (performance_id, closed_by, note, closed_at, report) VALUES (?,?,?,?,?)'
+    ).run(fresh.id, closedBy, note, closedAt, JSON.stringify(report));
+    db.prepare("UPDATE performances SET status = 'closed' WHERE id = ?").run(fresh.id);
+
+    return {
+      closing: {
+        id: Number(info.lastInsertRowid),
+        performance_id: fresh.id,
+        closed_by: closedBy,
+        note,
+        closed_at: closedAt,
+        report,
+      },
+      performance: db.prepare('SELECT * FROM performances WHERE id = ?').get(fresh.id),
+    };
+  });
+}
+
+route('POST', '/api/performances/:id/closeout/check', (body, p) => {
+  const perfId = Number(p.id);
+  const perf = db.prepare('SELECT * FROM performances WHERE id = ?').get(perfId);
+  if (!perf) throw new HttpError(404, '演出不存在');
+  if (perf.status === 'closed') {
+    throw new HttpError(409, '该演出已封场结项；可回看封场报告', { readonly: true, closed: true, closing: closingRowFor(perfId) });
+  }
+  if (perf.status === 'readonly') {
+    throw new HttpError(409, '已接续的只读演出不能封场；请对当前可操作（接续）演出执行封场', { readonly: true, closed: false });
+  }
+  return withTx(() => {
+    const fresh = db.prepare('SELECT * FROM performances WHERE id = ?').get(perfId);
+    assertActiveInTx(fresh);
+    const check = evaluateClosing(fresh);
+    return {
+      performance: { id: fresh.id, name: fresh.name, status: fresh.status },
+      can_close: check.can_close,
+      blockers: check.blockers,
+      counts: check.counts,
+    };
+  });
+});
+
+route('POST', '/api/performances/:id/closeout', (body, p) => {
+  const perfId = Number(p.id);
+  const closedBy = String(body.closed_by || body.operator || '').trim().slice(0, 50);
+  if (!closedBy) throw new HttpError(400, '请填写结项人');
+  const note = String(body.note || '').trim().slice(0, 500);
+  if (!note) throw new HttpError(400, '请填写封场说明');
+  return closePerformance(perfId, closedBy, note);
+});
+
+route('GET', '/api/performances/:id/closeout', (body, p) => {
+  const perf = db.prepare('SELECT id FROM performances WHERE id = ?').get(p.id);
+  if (!perf) throw new HttpError(404, '演出不存在');
+  const closing = closingRowFor(Number(p.id));
+  if (!closing) throw new HttpError(404, '该演出尚未封场，暂无封场报告');
+  return { closing };
 });
 
 /* ---------------- 分发 ---------------- */

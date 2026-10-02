@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS cues (
 CREATE INDEX IF NOT EXISTS idx_cues_version ON cues(version_id, seq);
 
 -- 每场演出：锁定一个已发布版本，独立记录
--- status: active 可现场操作；readonly 为已接续的原演出（保留原快照，仅可回看）
+-- status: active 可现场操作；readonly 为已接续的原演出（保留原快照，仅可回看）；
+--         closed 为已封场结项（终态，永久只读；封场报告见 performance_closings）
 -- continued_from_performance_id: 接续演出指向其来源演出（沿此链可追溯全部历史）
 CREATE TABLE IF NOT EXISTS performances (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,7 +60,7 @@ CREATE TABLE IF NOT EXISTS performances (
   name        TEXT NOT NULL DEFAULT '',
   started_by  TEXT NOT NULL DEFAULT '',
   started_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','readonly')),
+  status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','readonly','closed')),
   continued_from_performance_id INTEGER REFERENCES performances(id),
   continued_at TEXT,
   continued_by TEXT
@@ -146,6 +147,21 @@ CREATE TABLE IF NOT EXISTS cue_handovers (
 CREATE INDEX IF NOT EXISTS idx_handovers_perf ON cue_handovers(performance_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_handovers_pending_unique
   ON cue_handovers (performance_id) WHERE status = 'pending';
+
+-- 演出封场（结项）：演出结束时舞台监督填写非空结项人与说明执行封场。
+-- 封场前逐条核对当前演出版本的提示（均须有有效已触发/已跳过结果），并确认无待复核申请、
+-- 未解除故障、待签收交接单；全部通过后在同一写事务内一次性固定结项时间、结项人、说明与
+-- 不可变结项报告 report（最终提示结果及原操作人/时间/流水，承接结果沿接续链追溯原流水）。
+-- 封场后 performances.status='closed'（终态）：原记录与本报告永久可回看，该演出所有写操作
+-- （单项/成组处置、复核、故障、交接、接续、重复封场）一律拒绝。每演出至多一条封场记录。
+CREATE TABLE IF NOT EXISTS performance_closings (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  performance_id INTEGER NOT NULL UNIQUE REFERENCES performances(id) ON DELETE CASCADE,
+  closed_by      TEXT NOT NULL,
+  note           TEXT NOT NULL,
+  closed_at      TEXT NOT NULL,
+  report         TEXT NOT NULL
+);
 `);
 
 /**
@@ -215,6 +231,45 @@ function migratePerformancesContinuationIfNeeded() {
 }
 
 migratePerformancesContinuationIfNeeded();
+
+/**
+ * 旧库迁移：performances 表 status 的 CHECK 约束增加 'closed'（已封场终态）。
+ * 旧约束仅允许 active/readonly，直接 UPDATE 为 closed 会被拒绝，故检测后重建表
+ * （保留全部列与既有记录，外键引用在同一连接内自动跟随新表）。新库此函数为空操作。
+ */
+function migratePerformancesClosedIfNeeded() {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'performances'").get();
+  if (row && row.sql.includes("'closed'")) return;
+  db.exec('PRAGMA foreign_keys = OFF');
+  withTx(() => {
+    db.exec(`
+      CREATE TABLE performances_mig (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        show_id     INTEGER NOT NULL REFERENCES shows(id),
+        version_id  INTEGER NOT NULL REFERENCES versions(id),
+        name        TEXT NOT NULL DEFAULT '',
+        started_by  TEXT NOT NULL DEFAULT '',
+        started_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','readonly','closed')),
+        continued_from_performance_id INTEGER REFERENCES performances(id),
+        continued_at TEXT,
+        continued_by TEXT
+      );
+      INSERT INTO performances_mig
+        (id, show_id, version_id, name, started_by, started_at, status,
+         continued_from_performance_id, continued_at, continued_by)
+        SELECT id, show_id, version_id, name, started_by, started_at, status,
+               continued_from_performance_id, continued_at, continued_by
+        FROM performances;
+      DROP TABLE performances;
+      ALTER TABLE performances_mig RENAME TO performances;
+    `);
+  });
+  db.exec('PRAGMA foreign_keys = ON');
+  console.log('[init] 已迁移 performances 表：status 增加 closed（已封场终态）');
+}
+
+migratePerformancesClosedIfNeeded();
 
 /**
  * 旧库迁移：cue_events 表新增承接来源列（source / carried_from_performance_id /
