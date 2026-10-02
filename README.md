@@ -18,6 +18,7 @@
   - **成组连续处置**：现场需按顺序连续处置多条提示时，舞台监督在当前**可操作演出**中一次性选择不同编号、逐项指定**触发 / 跳过 / 撤回**，填写本组操作人及各项跳过 / 撤回原因；空清单或重复编号直接拒绝。执行台先展示**逐项预览**（每一步基于前面步骤产生的有效结果判定前置满足、下游撤回保护与待复核限制）与失败原因；**需双人复核的提示不得在成组中直接触发**（请走单项申请—确认）。提交瞬间在事务内按最新状态**重新逐项判定**，任一项失败都指出序号、编号与原因且**整组不产生流水**，全部通过才依次留下与单项操作一致的执行流水并返回各项结果；只读演出拒绝预览与提交，成组提交与接续、单项操作、故障处置在同一事务级串行，现有单项接口与响应保持兼容
 - **现场设备故障登记与解除**：舞台监督在当前可操作演出按提示编号登记故障（操作人 + 原因）；编号不属于该演出、信息为空或该编号已有未解除故障时拒绝。系统沿已发布执行单的前置关系标出故障提示及所有依赖它的后续提示；未解除期间受影响提示**不得触发**（单项触发、双人复核确认、成组预览与提交均按最新故障状态判 422），**待复核申请保留但不得确认**，跳过与撤回仍遵守原有规则；登记不改写任何既有执行流水。解除须记录操作人与原因，解除后按当前有效结果重算提示状态。故障登记 / 解除与现场操作、接续串行判定：接续前有未解除故障则拒绝且原演出保持可操作，已接续的只读演出不得登记或解除；执行台展示故障影响范围与登记 / 解除处理记录
 - **现场换班交接（交接单）**：舞台监督在**当前可操作演出**填写交班人、接班人（均非空且不能相同）与交接说明，生成一张**待签收交接单**；同一演出只保留一张待签收单（部分唯一索引保证）。交接单**固定当时快照**：各提示有效结果、最新流水位置、待复核申请、未解除故障（含影响范围），并列出尚未完成的提示及阻塞原因（前置未触发 / 待复核 / 故障冻结 / 待执行）。**交接期间现场操作照常进行**，不冻结任何操作；接班人签收时系统按最新状态**逐项核对**，任一快照内容已变化即返回分组差异、交接单保持待签收，交班人可据此**重提替换快照**（旧单标记「已被重提替换」并留痕，重提人须为原交班人）；全部一致才签收，签收记录不可变。交班人本人或其他人签收、重复签收均拒绝；接续后的只读演出只可回看交接单，不能提交、重提或签收（接续时未签收单自动作废留痕）。交接写操作与现场操作、复核、故障处置、接续在同一 `BEGIN IMMEDIATE` 事务内串行判定，执行台展示交接单快照与实时差异
+- **演出封场结项（不可变封场报告）**：演出结束时，舞台监督对**当前可操作（active）演出**填写非空**结项人**与**封场说明**执行封场。封场前按**当前演出版本**逐条核对：每条提示都必须有有效的**已触发 / 已跳过**结果（已撤回 / 无结果即未完成），且**待复核申请、未解除设备故障、待签收交接单**均已处理完；有阻项时**按编号列出未完成提示**、其余阻项分类列出（`review_requests` / `active_faults` / `pending_handovers`），演出保持可操作、**不生成报告**。核对通过后在同一事务内**一次性固定**结项时间、结项人、最终提示结果及原操作人 / 时间 / 本场流水 / 来源演出为不可变封场报告；**承接结果沿接续链追溯到原流水**（`source=carried` 的结果逐级回溯到最早一条现场 `manual` 流水），不算作本场再次触发。**已接续的只读演出不能封场**（须在当前可操作的接续演出上封场）；封场后演出转为 `closed`：原记录与不可变报告可回看，该演出的单项 / 成组处置、复核、故障、交接及接续写操作一律拒绝，**重复封场拒绝**。封场核对与现场写操作在同一 `BEGIN IMMEDIATE` 事务内串行，不可能留下部分结项；执行台与 HTTP API（`GET /api/performances/:id/closure-report`）均可查看报告
 - **明确错误**：无已发布版本、非法依赖、前置未满足、缺少操作人 / 原因等均有中文错误提示
 
 ## 一键启动（Docker Compose）
@@ -61,6 +62,7 @@ npm start          # 或 node server.js
 6. 排演中要改执行单：新建草稿（自动复制最新版本，含复核标记）→ 修改 → 发布为 v2；新演出即可选 v2，旧演出仍按 v1 回看
 7. **现场需改用新版**：进入当前演出执行台，点「改用修订执行单 → 发起接续」，选择更高的已发布版本、填写操作人，先「按编号核对」查看有痕迹编号（触发 / 跳过 / 撤回 / 复核 / 承接）与冲突，通过后「生成接续演出」。原演出立即只读（顶部横幅可跳到接续演出），接续演出继承有效结果并标注「承接」；需要再次修订时，只能从最新的接续演出发起下一次接续
 8. **现场换班**：执行台顶部「🔁 现场换班交接」面板填写交班人、接班人（须不同）与交接说明后「提交交接单」，面板即展示固定快照（各提示结果、最新流水位置、待复核申请、未解除故障、未完成提示及阻塞原因）；交接期间现场照常操作，页面 2.5 秒轮询会实时标出与快照的**差异**。接班人在面板填本人姓名点「逐项核对无误，签收」：有差异会被拒绝并列出差异，交班人点「交班人重提」即可用最新快照替换旧单（旧单留痕）；核对一致才签收，签收单进入下方不可变「交接历史」。只读（已接续）演出只可回看交接单
+9. **封场结项**：全部提示处理完毕、无待复核申请 / 未解除故障 / 待签收交接单后，在执行台底部「🏁 封场结项」面板填结项人与封场说明，先自动核对（未完成提示按编号列出、其他阻项分类列出，演出不受影响），核对通过后确认封场：页面固定并展示不可变**封场结项报告**（最终提示结果、原操作人 / 时间 / 本场流水 / 来源演出；承接结果已沿接续链追溯原流水），此后该演出只读回看、所有写操作关闭。已接续的只读演出不能封场，请到当前可操作的接续演出封场；接续链每场可分别结项
 
 ## 技术栈与结构
 
@@ -90,7 +92,7 @@ docker-compose.yml   # 一键启动 + 数据卷
 | POST | `/api/versions/:id/validate` | 校验（缺失引用 / 循环依赖） |
 | POST | `/api/versions/:id/publish` | 发布（校验失败 422 并附问题清单） |
 | POST | `/api/shows/:id/performances` | 启动演出（无已发布版本返回 400） |
-| GET | `/api/performances/:id` | 执行台状态（提示状态 + 事件流水 + 复核申请 + **设备故障** + **交接单**；附 `continuation` 接续关系与 `continue_targets` 可接续目标版本；各提示附 `needs_review`、`pending_request` 与故障字段 `fault_blocked` / `fault_blocked_labels` / `own_fault`；顶层附 `faults` 全部登记解除记录（含 `affected_labels`）与 `active_fault_count`；承接流水 `source:"carried"`；附当前待签收单 `handover`（含固定 `snapshot` 与按最新状态实时计算的 `live_diff`）及全部 `handover_history` 交接历史（`pending` / `signed` / `superseded`）） |
+| GET | `/api/performances/:id` | 执行台状态（提示状态 + 事件流水 + 复核申请 + **设备故障** + **交接单**；附 `continuation` 接续关系与 `continue_targets` 可接续目标版本；各提示附 `needs_review`、`pending_request` 与故障字段 `fault_blocked` / `fault_blocked_labels` / `own_fault`；顶层附 `faults` 全部登记解除记录（含 `affected_labels`）与 `active_fault_count`；承接流水 `source:"carried"`；附当前待签收单 `handover`（含固定 `snapshot` 与按最新状态实时计算的 `live_diff`）及全部 `handover_history` 交接历史（`pending` / `signed` / `superseded`）；演出 `status` 新增 `closed`（已封场结项），`continuation.closed=true` 时顶层附 `closure`（`closed_at/closed_by/note/report` 不可变封场报告）） |
 | POST | `/api/performances/:id/continue/preview` | **接续前按编号核对**（不改数据）：返回有痕迹编号及标记 `hints`、冲突清单 `conflicts`、待处理申请 `pending_requests`、拟承接结果 `carried` 与 `can_continue` |
 | POST | `/api/performances/:id/continue` | **生成接续演出**（body：`version_id` 目标版本、`operator` 必填、`name` 可选）。成功返回新演出与承接清单；冲突 409 附编号与原因；只读演出 / 非更高或未发布目标 4xx |
 | POST | `/api/performances/:id/batch/preview` | **成组连续处置·逐项预览**（不改数据）：body `{operator, items:[{label,action,reason}]}`，`action` 为 `fire/skip/retract`。返回逐项判定 `results`、成功/失败计数与 `can_submit`；空清单、重复编号、非法动作 400；只读演出 409 |
@@ -100,6 +102,9 @@ docker-compose.yml   # 一键启动 + 数据卷
 | POST | `/api/performances/:id/handover` | **提交 / 重提交接单**（body：`handed_by` 交班人、`received_by` 接班人、`note` 交接说明可选）：两人非空且不同，否则 400；只读演出 409。同一演出只保留一张待签收单：已有待签收单时须由**原交班人**重提（旧单置 `superseded` 留痕、替换为新快照），非原交班人 409。返回 `handover`（含 `snapshot` 快照与 `live_diff`）与 `replaced_handover_id` |
 | POST | `/api/performances/:id/handover/check` | **签收前只读核对**（不改数据）：返回待签收交接单、`matched`、`diff_count`、分组差异 `groups` 与打平清单 `diffs`；无待签收单 409 |
 | POST | `/api/performances/:id/handover/sign` | **接班人签收**（body：`operator` 必填，须为接班人本人）：交班人本人或其他人签收 409；重复签收 409；只读演出 409；快照后现场有任何变化则 409 返回 `groups` / `diffs` 差异且交接单保持待签收；全部一致才置 `signed`（记录 `signed_at`，不可变历史） |
+| POST | `/api/performances/:id/close/preview` | **封场前核对**（只读，不改数据）：按当前演出版本返回 `can_close`、未完成提示（按编号）`incomplete_cues`（`cue_id/label/seq`）与分类阻项 `review_requests` / `active_faults` / `pending_handovers`，及计数 `counts`（总数 / 已完成 / 未完成 / 已触发 / 已跳过）。已接续只读演出 409；已封场 409 |
+| POST | `/api/performances/:id/close` | **封场结项**（body：`closed_by` 结项人必填、`note` 封场说明必填；`operator` 可作为 `closed_by` 别名）：事务内按最新状态重跑核对，有阻项整体回滚、409 返回未完成提示与分类阻项，**演出保持可操作、不生成报告**；通过则一次性写入不可变报告并置演出 `closed`，返回 `performance` 与 `closure`（`closed_at/closed_by/note/report`）。已接续只读演出 409；缺结项人 / 说明 400；**重复封场 409** |
+| GET | `/api/performances/:id/closure-report` | **查看不可变封场报告**：返回 `closed_at` / `closed_by` / `note` / `report`；未封场 409（附 `status`），演出不存在 404。报告固定最终提示结果（含原操作人 / 时间 / 本场流水 / 来源演出；承接结果 `origin` 沿接续链追溯原 `manual` 流水、`carried_chain` 给出逐级来源）、全部流水 / 复核 / 故障 / 交接留痕与接续链 |
 | POST | `/api/performances/:id/cues/:cueId/fire` | 触发（前置未满足 422；**受未解除设备故障影响 422 附 `blocked_by_faults`**；已有结果 409 附当前状态；只读演出 409）。**需复核提示调用本接口不会直接触发**，而是登记复核申请并返回 `{ request }`（申请阶段不受故障限制，确认时才判定）；普通提示响应保持 `{ event }` |
 | POST | `/api/performances/:id/cues/:cueId/skip` | 跳过（缺原因 400；已有结果 409；待复核期间 409；只读演出 409） |
 | POST | `/api/performances/:id/cues/:cueId/retract` | 撤回已触发（缺撤回人/原因 400；非已触发 409；下游仍已触发 409 附 `affected` 编号列表；待复核期间 409；只读演出 409） |
@@ -581,16 +586,166 @@ curl http://localhost:3000/api/performances/1
 
 **接续后的只读演出**：待签收单在接续事务内自动置 `superseded`；对其调用提交 / 重提 / 签收统一 409（提交 / 重提返回既有只读错误并附接续演出位置，签收返回只读提示），交接单与快照在该演出中永久可回看。
 
+## 演出封场结项（本轮新增）
+
+演出结束时，舞台监督在**当前可操作演出**填写非空**结项人**与**封场说明**执行封场：系统按当前演出版本核对全部提示与遗留事项，通过后一次性固定一份**不可变封场结项报告**，演出随即转为终态 `closed`。
+
+**封场前核对（按当前演出版本逐条）**
+
+- 每条提示都必须有有效的**已触发或已跳过**结果；最新流水为 `retracted`（已撤回）或无流水的提示视为**未完成**，在 `incomplete_cues` 中**按编号**（附序号）列出
+- 其余阻项**分类列出**，三类都必须为空：
+  - `review_requests`：`pending` 待复核申请（先去确认 / 撤销 / 驳回；注意申请本身不算结果，对应提示仍需触发或跳过）
+  - `active_faults`：未解除设备故障（先解除并记录操作人与原因）
+  - `pending_handovers`：待签收交接单（先由接班人签收，或不再交接则由交班人重提后签收；未签收单不允许封场）
+- 有任一阻项：封场返回 **409**，响应同时给出 `incomplete_cues` 与三类阻项及 `counts`（总数 / 已完成 / 未完成 / 已触发 / 已跳过）；**演出保持可操作，不产生任何报告或结项记录**，处理后可重新封场
+
+**封场通过后一次性固定（同一事务原子提交）**
+
+- 结项时间（`closed_at`）、结项人（`closed_by`）、封场说明（`note`）
+- **最终提示结果**：逐条固定结果（fired/skipped）、**原操作人、原时间、本场流水 id 与来源演出**
+- **承接结果沿接续链追溯原流水**：本场最终结果为 `source:"carried"` 时，按 `carried_from_event_id` 逐级回溯到最早一条现场 `manual` 流水，报告中给出：
+  - 本场承接流水（`carried` / `carried_from_performance_id` / `carried_from_event_id`，保留原操作人与时间）
+  - `origin`：原流水（原 `event_id`、原演出、原操作人、原时间、`source=manual`）
+  - `carried_chain`：逐级来源清单（多级接续也能一路追溯到首场）
+  - 承接结果**绝不算作本场再次触发**（报告 `summary` 区分 `manual_event_count` 与 `carried_event_count`）
+- 同时固定本场全部流水（含撤回）、复核申请全量留痕、故障登记 / 解除留痕（封场时必无未解除）、交接单全量留痕（含已签收）与接续链
+- 报告写入独立不可变表 `closure_reports`（一场一份，无任何更新 / 删除入口），演出置 `closed` 并回填 `closure_report_id`——写报告与状态翻转同一 `BEGIN IMMEDIATE` 事务提交，**不可能留下部分结项**
+
+**终态约束**
+
+- **已接续的只读演出（`readonly`）不能封场**（409）；需要结项时在当前可操作的接续演出上封场，链上每场分别结项
+- 封场后（`closed`）该演出的**单项触发 / 跳过 / 撤回、成组预览 / 提交、复核申请与确认 / 撤销 / 驳回、故障登记 / 解除、交接提交 / 重提 / 签收、接续**等写操作统一拒绝（409，附 `closed:true` 与结项信息）；GET 回看与封场报告查看不受影响
+- **重复封场拒绝**（409）；对已封场演出调用封场前核对同样 409
+- 封场核对 / 封场与全部现场写操作在同一事务级**串行判定**：封场提交瞬间仍会重读最新状态重跑核对，排队期间的现场变化（如新登记故障、新增待复核申请、某提示被撤回）都会被捕获，有阻项整体回滚
+- 执行台在已封场演出顶部展示「🔒 已封场 · 结项」与结项信息，下方展示不可变封场报告；场次页演出记录标注「已封场 · 结项」。启动方式（`npm start` / Docker）与既有接口保持兼容
+
+**调用示例**（假设演出 id=1，已完成全部提示；演示数据初始为 L1 已触发、S1 已跳过）：
+
+```bash
+# 1) 封场前只读核对：未完成提示按编号、其余阻项分类；此时演出不受任何影响
+curl -X POST http://localhost:3000/api/performances/1/close/preview \
+  -H 'Content-Type: application/json' -d '{}'
+# 有阻项时：
+# → 200
+# {
+#   "can_close": false,
+#   "incomplete_cues": [
+#     {"cue_id":3,"label":"B1","seq":3},
+#     {"cue_id":4,"label":"L2","seq":4},
+#     {"cue_id":5,"label":"S2","seq":5},
+#     {"cue_id":6,"label":"B2","seq":6}
+#   ],
+#   "review_requests": [],
+#   "active_faults": [
+#     {"fault_id":3,"cue_id":1,"label":"L1","reported_by":"王监","reason":"功放烧毁","reported_at":"…"}
+#   ],
+#   "pending_handovers": [
+#     {"handover_id":1,"handed_by":"张三","received_by":"李四","created_at":"…"}
+#   ],
+#   "counts": {"total":6,"completed":2,"incomplete":4,"fired":1,"skipped":1}
+# }
+
+# 2) 有阻项时执行封场 → 409，演出保持 active，数据库无报告
+curl -X POST http://localhost:3000/api/performances/1/close \
+  -H 'Content-Type: application/json' \
+  -d '{"closed_by":"王监","note":"全剧终，设备清点正常撤场"}'
+# → 409
+# {"error":"封场核对未通过：存在未完成提示或其他阻项，演出保持可操作，未生成封场报告；请按编号处理后重试",
+#  "incomplete_cues":[…按编号…], "review_requests":[…], "active_faults":[…], "pending_handovers":[…], "counts":{…}}
+
+# 3) 参数缺失
+# → 400 {"error":"请填写结项人"}
+# → 400 {"error":"请填写封场说明"}
+
+# 4) 处理完所有阻项（示例：L2 触发，其余跳过；B2 先撤复核申请再跳过；故障解除；交接签收）后核对通过
+# → 200 {"can_close":true,"incomplete_cues":[],"review_requests":[],"active_faults":[],"pending_handovers":[],
+#        "counts":{"total":6,"completed":6,"incomplete":0,"fired":2,"skipped":4}}
+
+# 5) 执行封场：一次性固定不可变报告，演出转为 closed
+curl -X POST http://localhost:3000/api/performances/1/close \
+  -H 'Content-Type: application/json' \
+  -d '{"closed_by":"王监","note":"全剧终，设备清点正常撤场"}'
+# → 200
+# {
+#   "performance": {"id":1,"status":"closed","closed_at":"2026-10-02T20:00:00.000Z",
+#                   "closed_by":"王监","closure_note":"全剧终…","closure_report_id":1},
+#   "closure": {
+#     "closed_at":"2026-10-02T20:00:00.000Z", "closed_by":"王监", "note":"全剧终…",
+#     "report": { …见下… }
+#   }
+# }
+
+# 6) 报告内容（cue_results 逐条固定最终结果与原操作人/时间/本场流水/来源演出）
+# report.summary:
+# {"cue_count":6,"fired_count":2,"skipped_count":4,"carried_result_count":0,
+#  "event_count":6,"manual_event_count":6,"carried_event_count":0,"retracted_event_count":0,
+#  "review_request_count":1,"pending_review_count":0,"fault_count":1,"active_fault_count":0,
+#  "handover_count":1,"signed_handover_count":1}
+# report.cue_results[] 形如：
+# {"label":"L2","seq":4,"result":"fired","event_id":10,"operator":"张三","created_at":"…",
+#  "source":"manual","carried":false,
+#  "origin":{"event_id":10,"performance_id":1,"source":"manual","action":"fired","operator":"张三",…},
+#  "carried_chain":[]}
+
+# 7) 封场后查看报告（执行台与 HTTP API 均可；未封场 409）
+curl http://localhost:3000/api/performances/1/closure-report
+# → 200 {"performance_id":1,"closed_at":"…","closed_by":"王监","note":"…","report":{ …不可变… }}
+
+# 8) 重复封场 / 封场后任何写操作 → 统一 409
+curl -X POST http://localhost:3000/api/performances/1/close \
+  -H 'Content-Type: application/json' -d '{"closed_by":"王监","note":"再封一次"}'
+# → 409 {"error":"该演出已封场结项（结项时间 …，结项人 王监），不能重复封场；原记录与不可变封场报告可回看",
+#        "closed":true,"closed_at":"…","closed_by":"王监"}
+curl -X POST http://localhost:3000/api/performances/1/cues/4/fire \
+  -H 'Content-Type: application/json' -d '{"operator":"张三"}'
+# → 409 {"error":"该演出已封场结项（…），封场后单项 / 成组处置、复核、故障、交接及接续写操作均拒绝；原记录与不可变封场报告可回看",
+#        "readonly":true,"closed":true,…}
+
+# 9) 已接续的只读演出不能封场（须在当前可操作接续演出封场）
+curl -X POST http://localhost:3000/api/performances/1/close \
+  -H 'Content-Type: application/json' -d '{"closed_by":"王监","note":"x"}'
+# → 409 {"error":"已接续的只读演出不能封场；如需结项请在当前可操作（接续）演出上封场",
+#        "readonly":true,"closed":false}
+```
+
+**接续演出封场：承接结果追溯原流水**（演出 #1 →v2 接续为 #7，#7 封场）：
+
+```bash
+# #7 中 L1 为承接结果（本场流水 source=carried，指向 #2 那场的承接事件），
+# 报告沿接续链一直追溯到 #1 的现场原 manual 流水：
+curl http://localhost:3000/api/performances/7/closure-report
+# report.cue_results 中 L1 形如：
+# {
+#   "label":"L1","result":"fired","carried":true,"source":"carried",
+#   "event_id":31,                              # 本场（#7）承接流水
+#   "operator":"张三","created_at":"原触发时间",  # 沿用原操作人/原时间
+#   "carried_from_performance_id":2,"carried_from_event_id":24,
+#   "origin": {                                 # 沿链追溯到的原流水
+#     "event_id":1,"performance_id":1,"performance_name":"9月30日 晚场（进行中）",
+#     "version_number":1,"source":"manual","action":"fired",
+#     "operator":"张三","created_at":"最早触发时间"
+#   },
+#   "carried_chain": [                          # 逐级来源（#2 → #1）
+#     {"performance_id":2,"event_id":24,"source":"carried", …},
+#     {"performance_id":1,"event_id":1,"source":"manual", …}
+#   ]
+# }
+# report.summary.carried_result_count 计入承接条数，但 manual_event_count 不含它们（非本场再次触发）
+# report.continuation_chain: [演出 #7(v2), 演出 #1(v1)]
+```
+
 ## 数据与并发说明
 
 - `cue_events` 为**流水表**：触发 / 跳过 / 撤回逐条追加，全量留痕；同一演出同一提示的「当前有效结果」由最新一条事件推导（`retracted` 表示已撤回、当前无有效结果），至多一个当前有效结果。`source` 区分 `manual`（现场操作）与 `carried`（接续时自来源演出承接，附 `carried_from_performance_id` / `carried_from_event_id`，沿用原操作人与时间，非再次触发）
 - `cue_review_requests` 为**复核申请表**：申请（申请人、时间）与处置（确认 / 撤销 / 驳回、处置人、时间、原因、关联的触发流水 `event_id`）全量留痕；`pending → confirmed / cancelled / rejected` 为终态迁移，同一提示至多一条待复核申请
 - `cue_faults` 为**现场设备故障表**：登记（编号、登记人、原因、时间）与解除（解除人、时间、原因）全量留痕，`active → resolved` 终态迁移；部分唯一索引 `WHERE status='active'` 保证同一演出同一提示至多一条未解除故障。故障为独立记录，**不改写任何执行流水**；影响范围（故障编号本身 + 沿前置关系反向可达的全部下游）在读取时按版本依赖实时计算，解除后自然消失，提示状态按当前有效结果重算
 - `cue_handovers` 为**现场换班交接表**：提交（交班人、接班人、说明、固定快照 JSON、时间）、签收（`signed_at`）、重提替换（`superseded` + `superseded_at` + `superseded_by_handover_id`）全量留痕，状态机 `pending → signed`（签收终态、不可变）或 `pending → superseded`（原交班人重提 / 接续作废旧单）。部分唯一索引 `WHERE status='pending'` 保证**同一演出至多一张待签收单**；快照只在提交 / 重提时写入，签收核对始终实时比对当前状态而不修改快照
-- `performances` 记录接续关系：`status`（`active` 可操作 / `readonly` 已接续只读）、`continued_from_performance_id`（来源演出）、`continued_at/by`（接续时间与操作人）；接续演出绑定目标版本，原演出仍绑定原版本快照
-- 触发、跳过、撤回、复核处置、成组提交、**故障登记 / 解除**、**交接提交 / 重提 / 签收**与**接续**均在 `BEGIN IMMEDIATE` 事务内「读最新事件 / 申请 / 故障 / 交接单 / 演出状态 → 判定 → 写入」，并发操作串行判定，后到的冲突请求收到对应错误与当前状态（操作人、时间、原因、故障清单、交接差异、接续演出位置）。交接单本身**不冻结任何现场操作**：交接期间触发 / 跳过 / 撤回 / 复核 / 成组 / 故障照常，变化只在签收核对时体现为差异。未解除故障只冻结受影响提示的**触发**（含复核确认），跳过与撤回按原有规则判定；成组提交在事务内对整组清单**重新逐项判定**，任一项失败整体回滚（含同组已拟写入项），因此成组提交不可能只落一半流水；成组预览为只读快照判定（Node 单线程同步读，不穿插写操作），不写任何数据
+- `closure_reports` 为**封场结项报告表**：封场核对通过后在同一事务一次性写入（结项人、说明、结项时间、完整 JSON 报告），此后**不可变**（无更新 / 删除入口）；`UNIQUE(performance_id)` 保证一场演出至多一份。报告固定每条提示的最终结果与原操作人 / 时间 / 本场流水 / 来源演出，其中承接结果（`source=carried`）在生成报告时沿 `carried_from_event_id` **逐级追溯到原 `manual` 流水**（`origin` 与 `carried_chain`），不作为本场再次触发；同时固定全部流水 / 复核 / 故障 / 交接留痕与接续链
+- `performances` 记录接续与结项关系：`status` 三态 `active`（可现场操作）/ `readonly`（已接续只读）/ `closed`（已封场结项终态）；接续关系列为 `continued_from_performance_id` / `continued_at` / `continued_by`；结项列为 `closed_at` / `closed_by` / `closure_note` / `closure_report_id`（指向不可变报告）。接续演出绑定目标版本，原演出仍绑定原版本快照；`readonly` 与 `closed` 均为只读终态，区别是 readonly 仍可能作为接续链中的来源被回看，而 closed 已固定封场报告，二者都拒绝一切现场写操作
+- 触发、跳过、撤回、复核处置、成组提交、**故障登记 / 解除**、**交接提交 / 重提 / 签收**、**接续**与**封场核对 / 封场**均在 `BEGIN IMMEDIATE` 事务内「读最新事件 / 申请 / 故障 / 交接单 / 演出状态 → 判定 → 写入」，并发操作串行判定，后到的冲突请求收到对应错误与当前状态（操作人、时间、原因、故障清单、交接差异、接续演出位置、结项信息）。**封场事务内先插入不可变报告、再翻转演出状态，二者同提交同回滚，不可能留下部分结项**；有阻项时整体回滚，演出保持可操作且无报告。交接单本身**不冻结任何现场操作**：交接期间触发 / 跳过 / 撤回 / 复核 / 成组 / 故障照常，变化只在签收核对时体现为差异。未解除故障只冻结受影响提示的**触发**（含复核确认），跳过与撤回按原有规则判定；成组提交在事务内对整组清单**重新逐项判定**，任一项失败整体回滚（含同组已拟写入项），因此成组提交不可能只落一半流水；成组预览为只读快照判定（Node 单线程同步读，不穿插写操作），不写任何数据
 - 前置是否满足、提示状态（待执行/已触发/已跳过/受阻）均按**当前有效结果**计算：前置被撤回后，未执行的下游提示重新变为受阻；复核确认时同样按当前有效结果判定，前置失效或存在故障则确认拒绝且申请保持待复核；接续后未执行提示一律按**新版依赖**重算（承接的已触发计入满足）
+- 封场核对覆盖**当前演出版本的每一条提示**：有效结果只认最新事件为 fired/skipped（retracted / 无事件即未完成，按编号列出）；另要求当前无 pending 复核申请、无 active 故障、无 pending 交接单。承接结果不在本场重算触发，而是按 `carried_from_event_id` 沿**整条接续链**追溯最早的现场 manual 流水作为原操作人 / 时间 / 流水 / 来源演出
 - 接续前的按编号核对覆盖**整条接续链**（当前演出 + 逐级来源演出）：任一环节有触发 / 跳过 / 撤回流水、复核申请或承接结果的编号都须在新版保留其编号、类型、描述、前置集合与复核标记，且当前无待处理申请，否则整体拒绝并按编号返回原因
-- 旧版数据库启动时自动迁移：`cue_events` 唯一约束表重建为流水表、`cues` 补 `needs_review` 列（既有提示默认 0，按无需复核处理），`performances` 补 `status / continued_from_performance_id / continued_at / continued_by` 列（既有演出默认 `active`），`cue_events` 补 `source / carried_from_*` 列（既有流水默认 `manual`），并自动新建 `cue_faults` 故障登记表（含 active 部分唯一索引）与 `cue_handovers` 交接单表（含 pending 部分唯一索引），全部历史记录保留，无需手工操作
+- 旧版数据库启动时自动迁移：`cue_events` 唯一约束表重建为流水表、`cues` 补 `needs_review` 列（既有提示默认 0，按无需复核处理），`performances` 补 `status / continued_from_performance_id / continued_at / continued_by` 列（既有演出默认 `active`），`cue_events` 补 `source / carried_from_*` 列（既有流水默认 `manual`），自动新建 `cue_faults` 故障登记表（含 active 部分唯一索引）与 `cue_handovers` 交接单表（含 pending 部分唯一索引）；本轮再为 `performances` 补 `closed_at / closed_by / closure_note / closure_report_id` 列并把 status CHECK 放宽为 `active/readonly/closed`（旧库整表重建、历史记录全部保留），同时新建不可变 `closure_reports` 表（`UNIQUE(performance_id)`），无需手工操作
 - 演出与版本通过外键绑定，版本发布后无更新入口（含 `needs_review` 标记），因此历史回看永远呈现演出当时的执行单内容；接续只新建演出并把原演出置为只读，**不改动任何版本快照**
 - 接续关系可在执行台顶部横幅与场次页演出记录中查看；只读演出仍可随时打开回看其流水、复核申请与当时版本

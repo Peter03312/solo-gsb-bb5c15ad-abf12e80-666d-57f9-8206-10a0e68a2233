@@ -8,6 +8,12 @@ const connEl = document.getElementById('conn');
 const TYPE_TEXT = { light: '灯光', sound: '音效', set: '布景', other: '其他' };
 const STATUS_TEXT = { pending: '待执行', fired: '已触发', skipped: '已跳过', blocked: '受阻' };
 const REQUEST_STATUS_TEXT = { pending: '待复核', confirmed: '已确认', cancelled: '已撤销', rejected: '已驳回' };
+const CLOSURE_REASON_TEXT = {
+  incomplete: '未完成提示（无有效已触发 / 已跳过结果）',
+  review: '待复核申请未处置',
+  fault: '未解除设备故障',
+  handover: '待签收交接单',
+};
 
 let toastTimer = null;
 let pollTimer = null;
@@ -177,9 +183,11 @@ async function renderShow(id) {
                 <td>${p.id}</td>
                 <td>${esc(p.name || '（未命名）')}</td>
                 <td>v${p.version_number}</td>
-                <td>${p.status === 'readonly'
-                    ? '<span class="badge readonly">只读 · 已接续</span>'
-                    : '<span class="badge active">可操作</span>'}</td>
+                <td>${p.status === 'closed'
+                    ? '<span class="badge closed">已封场 · 结项</span>'
+                    : p.status === 'readonly'
+                      ? '<span class="badge readonly">只读 · 已接续</span>'
+                      : '<span class="badge active">可操作</span>'}</td>
                 <td class="muted">${p.continued_from_performance_id
                     ? `承接自 <a href="#/performances/${p.continued_from_performance_id}">#${p.continued_from_performance_id}（v${p.continued_from_version_number}）</a>`
                     : '—'}</td>
@@ -424,7 +432,7 @@ async function renderPerformance(id) {
   } catch (e) { app.innerHTML = `<div class="error-list">${esc(e.message)}</div>`; }
 }
 
-function drawPerformance(id, { performance: perf, continuation, continue_targets: targets, cues, events, review_requests: reviewRequests, faults, active_fault_count: activeFaultCount, handover, handover_history: handoverHistory }) {
+function drawPerformance(id, { performance: perf, continuation, continue_targets: targets, cues, events, review_requests: reviewRequests, faults, active_fault_count: activeFaultCount, handover, handover_history: handoverHistory, closure }) {
   // 2.5s 轮询整体重绘：记住当前焦点与光标位置，重绘后恢复，避免输入被打断
   const active = document.activeElement;
   const focusKey = active && (active.dataset.focusKey || (active.id === 'operator-input' ? 'operator' : null));
@@ -438,6 +446,8 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
   const pendingReqs = requests.filter(r => r.status === 'pending');
   const resolvedReqs = requests.filter(r => r.status !== 'pending');
   const readonly = !!(continuation && continuation.readonly);
+  const closed = !!(continuation && continuation.closed);
+  const locked = readonly || closed; // 只读（已接续）或已封场：一切现场写操作停用
   const carriedCount = events.filter(e => e.source === 'carried').length;
   const faultList = faults || [];
   const activeFaults = faultList.filter(f => f.status === 'active');
@@ -458,10 +468,15 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
       <h1 style="margin:4px 0">${esc(perf.show_name)} · ${esc(perf.name || '演出 #' + perf.id)}</h1>
       <div class="row muted" style="font-size:13px">
         <span>执行单 v${perf.version_number}（已发布快照）</span>
-        ${readonly ? '<span class="badge readonly">只读 · 已接续</span>' : '<span class="badge active">可操作</span>'}
+        ${closed
+          ? '<span class="badge closed">🔒 已封场 · 结项</span>'
+          : readonly
+            ? '<span class="badge readonly">只读 · 已接续</span>'
+            : '<span class="badge active">可操作</span>'}
         <span>开始：${fmtTime(perf.started_at)}</span>
         <span>启动人：${esc(perf.started_by || '-')}</span>
         ${perf.continued_at ? `<span>接续时间：${fmtTime(perf.continued_at)}（${esc(perf.continued_by || '-')}）</span>` : ''}
+        ${closed && closure ? `<span class="status closure-chip">结项：${fmtTime(closure.closed_at)}（${esc(closure.closed_by || '-')}）</span>` : ''}
         <span class="status pending">待执行 ${counts.pending}</span>
         <span class="status fired">已触发 ${counts.fired}</span>
         <span class="status skipped">已跳过 ${counts.skipped}</span>
@@ -470,28 +485,32 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
         ${activeFaults.length ? `<span class="status fault-active">⚠ 故障 ${activeFaults.length} · 冻结 ${blockedByFaultSet.size}</span>` : ''}
         ${handover ? `<span class="status handover-pending-chip">🔁 交接待签收 · ${esc(handover.received_by)}</span>` : ''}
         <span class="grow"></span>
-        <label>操作人 <input id="operator-input" type="text" value="${esc(opVal)}" placeholder="姓名" style="width:110px" ${readonly ? 'disabled' : ''}></label>
+        <label>操作人 <input id="operator-input" type="text" value="${esc(opVal)}" placeholder="姓名" style="width:110px" ${locked ? 'disabled' : ''}></label>
         <a href="#/shows/${perf.show_id}">返回场次</a>
       </div>
     </div>
     ${renderContinuationBanner(perf, continuation, carriedCount)}
-    ${readonly ? '' : '<div id="batch-panel-mount"></div>'}
+    ${closed && closure ? renderClosureBanner(closure) : ''}
+    ${locked ? '' : '<div id="batch-panel-mount"></div>'}
     <div id="handover-panel-mount"></div>
     <div id="fault-panel-mount"></div>
-    ${readonly ? '' : '<div id="continue-panel-mount"></div>'}
+    ${locked ? '' : '<div id="continue-panel-mount"></div>'}
+    ${closed ? '<div id="closure-panel-mount"></div>' : readonly ? '' : '<div id="closure-panel-mount"></div>'}
     <div class="grid-2">
       <div id="cue-list">
-        ${readonly && continuation.to
-          ? `<div class="readonly-note">🔒 该演出已按修订执行单接续，保留原快照供回看，现场操作请前往<a href="#/performances/${continuation.to.performance_id}">接续演出 #${continuation.to.performance_id}（v${continuation.to.version_number}）</a>。</div>`
-          : readonly
-            ? '<div class="readonly-note">🔒 该演出已转为只读，保留原快照供回看。</div>'
-            : ''}
-        ${cues.map(c => cueCard(id, c, readonly)).join('')}
+        ${closed
+          ? '<div class="readonly-note closure-note-bar">🔒 该演出已封场结项：提示结果、流水、复核、故障、交接均已固定为不可变封场报告，仅可回看；任何现场写操作（单项 / 成组处置、复核、故障、交接、接续）均已关闭。</div>'
+          : (readonly && continuation.to
+            ? `<div class="readonly-note">🔒 该演出已按修订执行单接续，保留原快照供回看，现场操作请前往<a href="#/performances/${continuation.to.performance_id}">接续演出 #${continuation.to.performance_id}（v${continuation.to.version_number}）</a>。</div>`
+            : readonly
+              ? '<div class="readonly-note">🔒 该演出已转为只读，保留原快照供回看。</div>'
+              : '')}
+        ${cues.map(c => cueCard(id, c, locked)).join('')}
       </div>
       <div>
         <div class="panel review-panel">
           <b>复核申请（待处理 ${pendingReqs.length}）</b>
-          ${readonly ? '<p class="muted">只读演出：申请记录可查，不能再处置。</p>' : ''}
+          ${locked ? `<p class="muted">${closed ? '已封场演出' : '只读演出'}：申请记录可查，不能再处置。</p>` : ''}
           ${pendingReqs.length === 0 ? (readonly ? '' : '<p class="muted">暂无待复核申请</p>') : `
           <ul>
             ${pendingReqs.map(r => {
@@ -504,9 +523,9 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
                 <span class="muted">申请人 ${esc(r.requested_by)} · ${fmtTime(r.requested_at)}</span><br>
                 ${reqFault ? '<span class="fault-note-text">受未解除故障影响，申请保留但故障解除前不得确认</span><br>' : ''}
                 <span class="review-actions">
-                  <button class="small" data-req-act="confirm" data-req="${r.id}" ${readonly || reqFault ? 'disabled' : ''}>确认触发</button>
-                  <button class="danger small" data-req-act="reject" data-req="${r.id}" ${readonly ? 'disabled' : ''}>驳回</button>
-                  <button class="ghost small" data-req-act="cancel" data-req="${r.id}" ${readonly ? 'disabled' : ''}>撤销</button>
+                  <button class="small" data-req-act="confirm" data-req="${r.id}" ${locked || reqFault ? 'disabled' : ''}>确认触发</button>
+                  <button class="danger small" data-req-act="reject" data-req="${r.id}" ${locked ? 'disabled' : ''}>驳回</button>
+                  <button class="ghost small" data-req-act="cancel" data-req="${r.id}" ${locked ? 'disabled' : ''}>撤销</button>
                 </span>
               </li>`;
             }).join('')}
@@ -545,10 +564,11 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
   const opInput = document.getElementById('operator-input');
   if (opInput) opInput.onchange = opInput.oninput = () => localStorage.setItem('operator', opInput.value.trim());
 
-  // 只读演出仍展示故障影响范围与处理记录（只读形态，无登记 / 解除表单）
-  drawHandoverPanel(id, handover, handoverHistory || [], true);
-  if (readonly) {
-    drawFaultPanel(id, cues, faultList, activeFaults, true);
+  // 只读 / 已封场演出仍展示故障影响范围与处理记录（只读形态，无登记 / 解除表单）
+  drawHandoverPanel(id, handover, handoverHistory || [], closed ? 'closed' : true);
+  if (locked) {
+    drawFaultPanel(id, cues, faultList, activeFaults, closed ? 'closed' : true);
+    if (closed) drawClosurePanel(id, closure);
     return;
   }
 
@@ -574,9 +594,10 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
   });
 
   drawBatchPanel(id, cues);
-  drawFaultPanel(id, cues, faultList, activeFaults, readonly);
+  drawFaultPanel(id, cues, faultList, activeFaults, false);
   drawContinuePanel(id, targets || []);
   drawHandoverPanel(id, handover, handoverHistory || [], false);
+  drawClosurePanel(id, null);
 
   // 恢复焦点（轮询重绘不打断操作人/成组表单输入）
   if (focusKey) {
@@ -617,10 +638,11 @@ function drawHandoverPanel(perfId, handover, history, readonly) {
   if (!mount) return;
   const st = getHandoverState(perfId);
 
+  const readonlyText = readonly === 'closed' ? '已封场演出' : '只读演出';
   const body = handover
     ? renderPendingHandover(perfId, handover, readonly, st)
     : readonly
-      ? '<p class="muted">只读演出：交接历史可回看，不能提交、重提或签收。</p>'
+      ? `<p class="muted">${readonlyText}：交接历史可回看，不能提交、重提或签收。</p>`
       : renderHandoverForm(perfId, st);
 
   const historyHtml = renderHandoverHistory(handover, history);
@@ -748,7 +770,7 @@ function renderPendingHandover(perfId, h, readonly, st) {
         <span class="badge handover-badge">待签收</span>
         <span>交班人 <b>${esc(h.handed_by)}</b> → 接班人 <b>${esc(h.received_by)}</b></span>
         <span class="muted">提交于 ${fmtTime(h.created_at)}</span>
-        ${readonly ? '<span class="badge readonly">只读演出</span>' : ''}
+        ${readonly ? `<span class="badge ${readonly === 'closed' ? 'closed' : 'readonly'}">${readonly === 'closed' ? '已封场演出' : '只读演出'}</span>` : ''}
       </div>
       ${h.note ? `<div class="handover-note">交接说明：${esc(h.note)}</div>` : ''}
       ${diffBanner}
@@ -1156,7 +1178,7 @@ function drawFaultPanel(perfId, cues, faultList, activeFaults, readonly) {
         <button class="ghost small" id="fault-toggle">${st.open ? '收起' : '展开'}</button>
       </div>
       ${st.open ? `
-      ${readonly ? '<p class="muted">只读演出：故障处理记录可查，不能登记或解除。</p>' : `
+      ${readonly ? `<p class="muted">${readonly === 'closed' ? '已封场演出' : '只读演出'}：故障处理记录可查，不能登记或解除。</p>` : `
       <div class="row" style="margin-top:10px">
         <label>故障编号
           <input id="fault-label" type="text" list="fault-labels-${perfId}" data-focus-key="fault-${perfId}-label"
@@ -1425,6 +1447,252 @@ async function doContinueRun(perfId) {
 
 function ACTION_TEXT(a) {
   return a === 'fired' ? '已触发' : a === 'skipped' ? '已跳过' : '已撤回';
+}
+
+/* ---------- 演出封场结项面板（封场前核对 + 封场；已封场展示不可变报告） ---------- */
+
+const closureUiState = new Map();
+function getClosureState(perfId) {
+  if (!closureUiState.has(perfId)) {
+    closureUiState.set(perfId, { open: false, closedBy: '', note: '', preflight: null });
+  }
+  return closureUiState.get(perfId);
+}
+
+function renderClosureBanner(closure) {
+  return `
+    <div class="continuation-banner">
+      <span class="chain-chip closure-chain">🏁 已封场结项 · ${fmtTime(closure.closed_at)} · 结项人 ${esc(closure.closed_by || '-')}${closure.note ? ' · ' + esc(closure.note) : ''}</span>
+    </div>`;
+}
+
+function drawClosurePanel(perfId, closure) {
+  const mount = document.getElementById('closure-panel-mount');
+  if (!mount) return;
+  if (closure) {
+    mount.innerHTML = renderClosureReport(closure);
+    return;
+  }
+  const st = getClosureState(perfId);
+  const byVal = st.closedBy || getOperator();
+  mount.innerHTML = `
+    <div class="panel closure-panel">
+      <div class="row">
+        <b>🏁 封场结项</b>
+        <span class="muted">封场前按当前演出版本核对每条提示：均须有有效已触发 / 已跳过结果；待复核申请、未解除故障、待签收交接单均须处理完。通过后一次性固定不可变封场报告</span>
+        <span class="grow"></span>
+        <button class="ghost small" id="closure-toggle">${st.open ? '收起' : '展开封场'}</button>
+      </div>
+      ${st.open ? `
+      <div style="margin-top:10px">
+        <div id="closure-preflight"></div>
+        <div class="row" style="margin-top:10px">
+          <label>结项人 <input id="closure-by" type="text" data-focus-key="closure-${perfId}-by"
+                 value="${esc(byVal)}" placeholder="结项人姓名（必填）" style="width:150px"></label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <textarea id="closure-note" rows="2" class="grow" data-focus-key="closure-${perfId}-note"
+            placeholder="封场说明（必填，如：全剧终，设备清点正常撤场）">${esc(st.note)}</textarea>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="ghost" id="closure-check">重新核对</button>
+          <button class="big closure-run" id="closure-run" disabled>核对通过，执行封场</button>
+          <span class="muted">封场与现场写操作串行：有阻项时演出保持可操作、不生成报告；已接续的只读演出不能封场，封场后不可重复封场</span>
+        </div>
+      </div>` : ''}
+    </div>`;
+  document.getElementById('closure-toggle').onclick = () => {
+    st.open = !st.open;
+    if (st.open) loadClosurePreflight(perfId);
+    else refreshClosureMount(perfId, null);
+  };
+  if (!st.open) return;
+  const byEl = document.getElementById('closure-by');
+  const noteEl = document.getElementById('closure-note');
+  byEl.oninput = () => { st.closedBy = byEl.value; };
+  noteEl.oninput = () => { st.note = noteEl.value; };
+  document.getElementById('closure-check').onclick = () => loadClosurePreflight(perfId);
+  document.getElementById('closure-run').onclick = () => doClose(perfId);
+  renderClosurePreflight(perfId);
+}
+
+function refreshClosureMount(perfId, closure) {
+  // 轻量重绘封场面板（不打断其他面板输入）
+  drawClosurePanel(perfId, closure);
+}
+
+async function loadClosurePreflight(perfId) {
+  const st = getClosureState(perfId);
+  const box = document.getElementById('closure-preflight');
+  if (box) box.innerHTML = '<p class="muted">核对中…</p>';
+  try {
+    st.preflight = await api(`/api/performances/${perfId}/close/preview`, { method: 'POST', body: {} });
+    renderClosurePreflight(perfId);
+  } catch (e) {
+    st.preflight = null;
+    if (box) box.innerHTML = `<div class="error-list">${esc(e.message)}</div>`;
+  }
+}
+
+function renderClosurePreflight(perfId) {
+  const st = getClosureState(perfId);
+  const box = document.getElementById('closure-preflight');
+  if (!box) return;
+  const pv = st.preflight;
+  if (!pv) {
+    box.innerHTML = '<p class="muted">点「重新核对」按当前演出版本检查封场条件。</p>';
+    return;
+  }
+  const c = pv.counts || {};
+  const groups = [];
+  if (pv.incomplete_cues.length) {
+    groups.push(`
+      <div class="closure-block">
+        <b>未完成提示（${pv.incomplete_cues.length}，按编号）：</b>
+        <div>${pv.incomplete_cues.map(x => `<span class="hint-flag flag-blocker">${esc(x.label)}</span>`).join(' ')}</div>
+      </div>`);
+  }
+  if (pv.review_requests.length) {
+    groups.push(`
+      <div class="closure-block">
+        <b>${CLOSURE_REASON_TEXT.review}（${pv.review_requests.length}）：</b>
+        <div>${pv.review_requests.map(x => `<span class="hint-flag flag-blocker">${esc(x.label)}（${esc(x.requested_by)}）</span>`).join(' ')}</div>
+      </div>`);
+  }
+  if (pv.active_faults.length) {
+    groups.push(`
+      <div class="closure-block">
+        <b>${CLOSURE_REASON_TEXT.fault}（${pv.active_faults.length}）：</b>
+        <div>${pv.active_faults.map(x => `<span class="hint-flag flag-blocker">${esc(x.label)}（${esc(x.reported_by)}：${esc(x.reason)}）</span>`).join(' ')}</div>
+      </div>`);
+  }
+  if (pv.pending_handovers.length) {
+    groups.push(`
+      <div class="closure-block">
+        <b>${CLOSURE_REASON_TEXT.handover}（${pv.pending_handovers.length}）：</b>
+        <div>${pv.pending_handovers.map(x => `<span class="hint-flag flag-blocker">#${x.handover_id} ${esc(x.handed_by)} → ${esc(x.received_by)}</span>`).join(' ')}</div>
+      </div>`);
+  }
+
+  const head = pv.can_close
+    ? `<div class="ok-box">✓ 核对通过：共 ${c.total} 条提示全部有有效结果（已触发 ${c.fired}、已跳过 ${c.skipped}），无待复核申请、未解除故障与待签收交接单，可以封场。</div>`
+    : `<div class="error-list"><b>封场核对未通过（${c.completed || 0}/${c.total || 0} 已完成），演出保持可操作、不会生成报告：</b>${groups.join('')}</div>`;
+  box.innerHTML = head;
+  const runBtn = document.getElementById('closure-run');
+  if (runBtn) runBtn.disabled = !pv.can_close;
+}
+
+async function doClose(perfId) {
+  const st = getClosureState(perfId);
+  const closedBy = (document.getElementById('closure-by').value || '').trim();
+  const note = (document.getElementById('closure-note').value || '').trim();
+  st.closedBy = closedBy; st.note = note;
+  if (!closedBy) return toast('请填写结项人', true);
+  if (!note) return toast('请填写封场说明', true);
+  if (!st.preflight || !st.preflight.can_close) {
+    await loadClosurePreflight(perfId);
+    return toast('封场核对未通过，请先处理阻项', true);
+  }
+  if (!window.confirm('确认封场结项？\n封场将一次性固定结项时间、结项人、最终提示结果及原操作人 / 时间 / 流水 / 来源演出；封场后该演出一切现场写操作均拒绝，且不可重复封场。')) return;
+  try {
+    const r = await api(`/api/performances/${perfId}/close`, { method: 'POST', body: { closed_by: closedBy, note } });
+    toast(`已封场结项（${r.closure.closed_at}）`);
+  } catch (e) {
+    // 事务内串行判定发现阻项（排队期间现场变化）：刷新核对结果，演出保持可操作
+    if (e.data && (e.data.incomplete_cues || e.data.review_requests || e.data.active_faults || e.data.pending_handovers)) {
+      st.preflight = e.data;
+      renderClosurePreflight(perfId);
+    }
+    return toast(e.message, true);
+  }
+  stopPolling();
+  renderPerformance(perfId);
+}
+
+function renderClosureReport(closure) {
+  const r = closure.report || {};
+  const s = r.summary || {};
+  const rows = (r.cue_results || []).map(c => `
+    <tr>
+      <td>${c.seq}</td>
+      <td><b>${esc(c.label)}</b>${c.carried ? '<span class="badge carried">承接</span>' : ''}</td>
+      <td><span class="status ${c.result}">${ACTION_TEXT(c.result)}</span></td>
+      <td class="muted">${esc(c.operator)}</td>
+      <td class="muted">${fmtTime(c.created_at)}</td>
+      <td class="muted">
+        ${c.carried
+          ? `承接自演出 #${esc(c.carried_from_performance_id)}；原流水：#${c.origin.performance_id} 第 ${c.origin.event_id} 条（${ACTION_TEXT(c.origin.action)}，${esc(c.origin.operator)}，${fmtTime(c.origin.created_at)}）`
+          : '本场现场操作'}
+      </td>
+    </tr>`).join('');
+
+  const reviewBlock = (r.review_requests || []).length
+    ? `<details class="handover-details"><summary class="muted">复核申请留痕（${r.review_requests.length}）</summary>
+        <div class="hint-table-wrap"><table class="hint-table">
+          <thead><tr><th>编号</th><th>状态</th><th>申请人/时间</th><th>处置</th></tr></thead>
+          <tbody>${r.review_requests.map(q => `
+            <tr>
+              <td><b>${esc(q.label)}</b></td>
+              <td>${REQUEST_STATUS_TEXT[q.status] || q.status}</td>
+              <td class="muted">${esc(q.requested_by)} · ${fmtTime(q.requested_at)}</td>
+              <td class="muted">${q.resolved_by ? esc(q.resolved_by) + ' · ' + fmtTime(q.resolved_at) + (q.resolve_reason ? ' · ' + esc(q.resolve_reason) : '') : '—'}</td>
+            </tr>`).join('')}</tbody>
+        </table></div></details>`
+    : '';
+
+  const faultBlock = (r.faults || []).length
+    ? `<details class="handover-details"><summary class="muted">设备故障留痕（${r.faults.length}，封场时均已解除）</summary>
+        <ul class="handover-mini-list">
+          ${r.faults.map(f => `<li><b>${esc(f.label)}</b>：登记 ${esc(f.reported_by)} · ${fmtTime(f.reported_at)}：${esc(f.reason)}；解除 ${esc(f.resolved_by || '-')} · ${fmtTime(f.resolved_at)}：${esc(f.resolve_reason || '')}</li>`).join('')}
+        </ul></details>`
+    : '';
+
+  const handoverBlock = (r.handovers || []).length
+    ? `<details class="handover-details"><summary class="muted">交接单留痕（${r.handovers.length}，已签收 ${s.signed_handover_count || 0}）</summary>
+        <ul class="handover-mini-list">
+          ${r.handovers.map(h => `<li>#${h.id} <b>${esc(h.handed_by)} → ${esc(h.received_by)}</b> · ${HANDOVER_STATUS_TEXT[h.status] || h.status} · ${fmtTime(h.created_at)}${h.signed_at ? ' · 签收 ' + fmtTime(h.signed_at) : ''}</li>`).join('')}
+        </ul></details>`
+    : '';
+
+  const chain = (r.continuation_chain || []).map((p, i) =>
+    `${i ? ' ← ' : ''}演出 #${p.performance_id}（v${p.version_number}${p.name ? ' · ' + esc(p.name) : ''}）`
+  ).join('');
+
+  return `
+    <div class="panel closure-report">
+      <div class="row">
+        <b>🏁 封场结项报告（不可变）</b>
+        <span class="badge closure-badge">已封场</span>
+        <span class="grow"></span>
+        <span class="muted">结项时间 ${fmtTime(closure.closed_at)} · 结项人 ${esc(closure.closed_by || '-')}</span>
+      </div>
+      ${closure.note ? `<div class="handover-note">封场说明：${esc(closure.note)}</div>` : ''}
+      <div class="row muted" style="font-size:13px;margin-top:6px">
+        <span>${esc(r.show ? r.show.name : '')} · ${esc((r.performance || {}).name || '')}</span>
+        <span>执行单 v${r.version ? r.version.version_number : '?'}</span>
+        <span>开始 ${fmtTime(r.performance ? r.performance.started_at : null)}（${esc(r.performance ? r.performance.started_by : '-')}）</span>
+        ${chain ? `<span>接续链：${chain}</span>` : ''}
+      </div>
+      <div class="closure-summary">
+        <span class="hint-flag flag-fired">已触发 ${s.fired_count || 0}</span>
+        <span class="hint-flag flag-skipped">已跳过 ${s.skipped_count || 0}</span>
+        <span class="hint-flag flag-carried">承接结果 ${s.carried_result_count || 0}</span>
+        <span class="hint-flag">本场流水 ${s.event_count || 0}（现场 ${s.manual_event_count || 0} / 承接 ${s.carried_event_count || 0} / 撤回 ${s.retracted_event_count || 0}）</span>
+        <span class="hint-flag">复核申请 ${s.review_request_count || 0}</span>
+        <span class="hint-flag">故障 ${s.fault_count || 0}</span>
+        <span class="hint-flag">交接单 ${s.handover_count || 0}</span>
+      </div>
+      <details class="handover-details" open>
+        <summary class="muted">最终提示结果（${(r.cue_results || []).length} 条，含原操作人 / 时间 / 本场流水 / 来源演出；承接结果已沿接续链追溯原流水）</summary>
+        <div class="hint-table-wrap"><table class="hint-table closure-result-table">
+          <thead><tr><th style="width:40px">#</th><th>编号</th><th>最终结果</th><th>本场操作人</th><th>本场时间</th><th>原流水 / 来源</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </details>
+      ${reviewBlock}
+      ${faultBlock}
+      ${handoverBlock}
+    </div>`;
 }
 
 function cueCard(perfId, c, readonly) {

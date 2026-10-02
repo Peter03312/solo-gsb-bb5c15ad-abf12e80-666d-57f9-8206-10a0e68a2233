@@ -285,3 +285,24 @@ button.fault-btn { color: var(--fault); border-color: #6b512c; margin-top: 2px; 
 .hint-flag.flag-fault-self { font-weight: 700; }
 .fault-history { margin-top: 10px; font-size: 13px; }
 .fault-history li { margin: 6px 0; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
+
+/* 演出封场结项 */
+.badge.closed { background: #2c2640; color: #c9b8f0; border: 1px solid #6f5fb0; }
+.status.closure-chip { color: #c9b8f0; }
+.chain-chip.closure-chain { border-color: #4a3f73; background: #241f38; }
+.closure-note-bar { border-left-color: #8a76d0; background: #241f38; }
+
+.closure-panel { border-left: 4px solid #8a76d0; margin-bottom: 16px; }
+.closure-block { margin: 8px 0; font-size: 13px; }
+.hint-flag.flag-blocker {
+  color: var(--blocked); border-color: var(--blocked);
+  background: rgba(224, 108, 117, 0.08); margin-top: 4px;
+}
+button.closure-run { background: #6f5fb0; }
+button.closure-run:hover { filter: brightness(1.15); }
+.closure-panel textarea { width: 100%; resize: vertical; }
+
+.closure-report { border-left: 4px solid #8a76d0; background: #211d31; }
+.badge.closure-badge { background: #2e2a4a; color: #c9b8f0; border: 1px solid #8a76d0; }
+.closure-summary { margin: 10px 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.closure-result-table td { vertical-align: top; }

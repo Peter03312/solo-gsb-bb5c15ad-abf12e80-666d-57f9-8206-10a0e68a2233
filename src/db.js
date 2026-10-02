@@ -50,8 +50,10 @@ CREATE TABLE IF NOT EXISTS cues (
 CREATE INDEX IF NOT EXISTS idx_cues_version ON cues(version_id, seq);
 
 -- 每场演出：锁定一个已发布版本，独立记录
--- status: active 可现场操作；readonly 为已接续的原演出（保留原快照，仅可回看）
+-- status: active 可现场操作；readonly 为已接续的原演出（保留原快照，仅可回看）；
+--         closed 为已封场结项（原记录与不可变封场报告可回看，一切现场写操作拒绝）
 -- continued_from_performance_id: 接续演出指向其来源演出（沿此链可追溯全部历史）
+-- closed_at/by/note: 封场结项时间、结项人、封场说明；closure_report_id 指向一次性固定的不可变报告
 CREATE TABLE IF NOT EXISTS performances (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   show_id     INTEGER NOT NULL REFERENCES shows(id),
@@ -59,10 +61,27 @@ CREATE TABLE IF NOT EXISTS performances (
   name        TEXT NOT NULL DEFAULT '',
   started_by  TEXT NOT NULL DEFAULT '',
   started_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','readonly')),
+  status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','readonly','closed')),
   continued_from_performance_id INTEGER REFERENCES performances(id),
   continued_at TEXT,
-  continued_by TEXT
+  continued_by TEXT,
+  closed_at   TEXT,
+  closed_by   TEXT,
+  closure_note TEXT NOT NULL DEFAULT '',
+  closure_report_id INTEGER REFERENCES closure_reports(id)
+);
+
+-- 封场结项报告：封场通过核对后在同一事务内一次性写入，此后不可变（无任何更新 / 删除入口）。
+-- 一场演出至多一份（UNIQUE(performance_id)）；report 为固定下来的完整 JSON：
+-- 结项时间 / 结项人 / 最终提示结果（含原操作人、原时间、本场流水、来源演出；
+-- 承接结果沿接续链追溯到原 manual 流水）、全部流水、复核、故障、交接留痕与接续链。
+CREATE TABLE IF NOT EXISTS closure_reports (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  performance_id INTEGER NOT NULL UNIQUE REFERENCES performances(id),
+  closed_by      TEXT NOT NULL,
+  closed_note    TEXT NOT NULL DEFAULT '',
+  closed_at      TEXT NOT NULL,
+  report         TEXT NOT NULL
 );
 
 -- 执行流水：触发 / 跳过 / 撤回 全量留痕；同一演出同一提示的"当前有效结果"
@@ -215,6 +234,64 @@ function migratePerformancesContinuationIfNeeded() {
 }
 
 migratePerformancesContinuationIfNeeded();
+
+/**
+ * 旧库迁移：performances 表新增封场结项列（closed_at / closed_by / closure_note /
+ * closure_report_id），并放宽 status CHECK 约束以容纳 closed（已封场）状态；
+ * 同时新建 closure_reports 不可变封场报告表。既有演出均保持 active，封场列留空。
+ * 新库（建表时已含全部列与三态约束、且报告表已建）此函数为空操作。
+ */
+function migratePerformancesClosureIfNeeded() {
+  const cols = db.prepare('PRAGMA table_info(performances)').all();
+  const has = (name) => cols.some((c) => c.name === name);
+  if (!has('closed_at')) db.exec('ALTER TABLE performances ADD COLUMN closed_at TEXT');
+  if (!has('closed_by')) db.exec('ALTER TABLE performances ADD COLUMN closed_by TEXT');
+  if (!has('closure_note')) db.exec("ALTER TABLE performances ADD COLUMN closure_note TEXT NOT NULL DEFAULT ''");
+  if (!has('closure_report_id')) {
+    db.exec('ALTER TABLE performances ADD COLUMN closure_report_id INTEGER REFERENCES closure_reports(id)');
+  }
+
+  // 旧库 status CHECK 仅允许 active/readonly：检出后按新结构整表重建（历史记录全部保留）
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'performances'").get();
+  const checkAllowsClosed = /'closed'/.test(row.sql);
+  if (!checkAllowsClosed) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    withTx(() => {
+      db.exec(`
+        CREATE TABLE performances_mig (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          show_id     INTEGER NOT NULL REFERENCES shows(id),
+          version_id  INTEGER NOT NULL REFERENCES versions(id),
+          name        TEXT NOT NULL DEFAULT '',
+          started_by  TEXT NOT NULL DEFAULT '',
+          started_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','readonly','closed')),
+          continued_from_performance_id INTEGER REFERENCES performances(id),
+          continued_at TEXT,
+          continued_by TEXT,
+          closed_at   TEXT,
+          closed_by   TEXT,
+          closure_note TEXT NOT NULL DEFAULT '',
+          closure_report_id INTEGER REFERENCES closure_reports(id)
+        );
+        INSERT INTO performances_mig
+          (id, show_id, version_id, name, started_by, started_at, status,
+           continued_from_performance_id, continued_at, continued_by,
+           closed_at, closed_by, closure_note, closure_report_id)
+        SELECT id, show_id, version_id, name, started_by, started_at, status,
+           continued_from_performance_id, continued_at, continued_by,
+           closed_at, closed_by, closure_note, closure_report_id
+        FROM performances;
+        DROP TABLE performances;
+        ALTER TABLE performances_mig RENAME TO performances;
+      `);
+    });
+    db.exec('PRAGMA foreign_keys = ON');
+    console.log('[init] 已迁移 performances 表：status 支持 closed（已封场）状态并补齐封场结项列');
+  }
+}
+
+migratePerformancesClosureIfNeeded();
 
 /**
  * 旧库迁移：cue_events 表新增承接来源列（source / carried_from_performance_id /
